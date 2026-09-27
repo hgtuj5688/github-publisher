@@ -26,6 +26,10 @@ window.__ModuleLoader__.load({
       source: '来源',
       sourceSession: '重读整个会话',
       sourceManual: '手动',
+      loadFile: '读取 txt 文件',
+      loadedFile: '已读取 {name}（{count} 字）',
+      fileFailed: '读取失败：{message}',
+      fileTooLarge: '文件太大（{count} 字），单次发布最多 {limit} 字',
       sessionRange: '本会话 {part}/{total} 条消息',
       summaryLabel: '标题（可选，帮助模型写好简介）',
       summaryPlaceholder: '这段总结是什么？例如：DSH 插件开发笔记',
@@ -51,6 +55,10 @@ window.__ModuleLoader__.load({
       source: 'Source',
       sourceSession: 're-read whole session',
       sourceManual: 'manual',
+      loadFile: 'Read a .txt file',
+      loadedFile: 'read {name} ({count} chars)',
+      fileFailed: 'could not read it: {message}',
+      fileTooLarge: 'the file is too large ({count} chars); one publish carries at most {limit} chars',
       sessionRange: 'session {part}/{total} messages',
       summaryLabel: 'Title (optional; helps the model write a good intro)',
       summaryPlaceholder: 'What is this summary? For example: DSH plugin notes',
@@ -90,6 +98,7 @@ window.__ModuleLoader__.load({
       '.ghp-textarea{width:100%;height:150px;resize:vertical;padding:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;line-height:1.45}',
       '.ghp-check{display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--dsw-alias-label-secondary)}',
       '.ghp-count{flex:1 1 auto;text-align:right;color:var(--dsw-alias-label-secondary)}',
+      '.ghp-hidden{display:none}',
       '.ghp-note{margin-top:6px;color:var(--dsw-alias-label-secondary)}',
       '.ghp-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:10px}',
       '.ghp-ghost{padding:6px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer}',
@@ -130,6 +139,13 @@ window.__ModuleLoader__.load({
 
     /** Character budget for one transcript draft, kept below the host's body limit. */
     const SESSION_CHAR_BUDGET = 60_000;
+
+    /**
+     * Characters one draft may hold. The host refuses a body above 4 MB and the
+     * text is encoded as UTF-8, so a Chinese transcript can weigh three bytes per
+     * character; this number keeps the encoded body safely under that limit.
+     */
+    const DRAFT_CHAR_LIMIT = 1_000_000;
 
     /**
      * Render one node as a titled section.
@@ -208,6 +224,33 @@ window.__ModuleLoader__.load({
         return;
       }
       if (typeof window !== 'undefined' && typeof window.open === 'function') window.open(value, '_blank', 'noopener');
+    }
+
+    /**
+     * Wrap a thrown value as an Error, so callers can read `.message`.
+     * @param {unknown} error - the thrown value.
+     * @returns {Error} the error.
+     */
+    function asError(error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+
+    /**
+     * Read a picked file as text and report its size. The draft goes through the
+     * same JSON body as any other content, so the size is checked before the text
+     * is put in the box rather than after the host refuses it.
+     * @param {any} file - the picked file; needs `name` and a `text()` method.
+     * @returns {Promise<{name: string, text: string}>} the decoded file.
+     */
+    async function readTextFile(file) {
+      const name = typeof file?.name === 'string' && file.name.length > 0 ? file.name : 'file.txt';
+      if (typeof file?.text !== 'function') throw new Error('this file cannot be read as text');
+      const text = await file.text();
+      const value = typeof text === 'string' ? text : '';
+      if (value.length > DRAFT_CHAR_LIMIT) {
+        throw new Error(`TOO_LARGE:${String(value.length)}`);
+      }
+      return { name, text: value };
     }
 
     /**
@@ -299,6 +342,7 @@ window.__ModuleLoader__.load({
         const [isPublic, setIsPublic] = React.useState(true);
         const [status, setStatus] = React.useState(null);
         const [account, setAccount] = React.useState(null);
+        const fileRef = React.useRef(null);
 
         const ready = typeof sessionId === 'string' && sessionId.length > 0;
 
@@ -341,6 +385,35 @@ window.__ModuleLoader__.load({
         const useSession = () => {
           setDraft(composeDocument(transcript));
           setStatus(null);
+        };
+
+        /**
+         * Put one picked `.txt` file into the draft, replacing whatever is there.
+         * A failed read reports the reason instead of clearing the box, so a typo
+         * in the file choice never costs the text that was already typed.
+         * @param {any} file - the picked file.
+         * @returns {Promise<void>} resolves once the attempt settled.
+         */
+        const loadFile = async (file) => {
+          if (file === undefined || file === null) return;
+          try {
+            const loaded = await readTextFile(file);
+            setDraft(loaded.text);
+            setStatus({
+              kind: 'info',
+              text: t('loadedFile').replace('{name}', loaded.name).replace('{count}', String(loaded.text.length)),
+            });
+          } catch (error) {
+            const message = asError(error).message;
+            setStatus({
+              kind: 'error',
+              text: message.startsWith('TOO_LARGE:')
+                ? t('fileTooLarge')
+                  .replace('{count}', message.slice('TOO_LARGE:'.length))
+                  .replace('{limit}', String(DRAFT_CHAR_LIMIT))
+                : t('fileFailed').replace('{message}', message),
+            });
+          }
         };
 
         /**
@@ -441,6 +514,27 @@ window.__ModuleLoader__.load({
             onChange: (event) => setDraft(event.target.value),
           }),
           h('div', { className: 'ghp-row' },
+            h('input', {
+              ref: fileRef,
+              className: 'ghp-hidden',
+              type: 'file',
+              accept: '.txt,text/plain',
+              onChange: (event) => {
+                const picked = event?.target?.files?.[0];
+                // Clear the value so picking the same file twice fires again.
+                if (event?.target !== undefined) event.target.value = '';
+                loadFile(picked);
+              },
+            }),
+            h('button', {
+              type: 'button',
+              className: 'ghp-ghost',
+              title: t('loadFile'),
+              onClick: () => {
+                const input = fileRef.current;
+                if (input !== null && input !== undefined && typeof input.click === 'function') input.click();
+              },
+            }, t('loadFile')),
             h('button', { type: 'button', className: 'ghp-ghost', onClick: useSession }, t('sourceSession')),
             h('span', { className: 'ghp-count' },
               transcript.total === 0
