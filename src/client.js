@@ -26,6 +26,8 @@ window.__ModuleLoader__.load({
       source: '来源',
       sourceSession: '重读整个会话',
       sourceManual: '手动',
+      pathLabel: '发布到仓库里的哪个文件',
+      pathNote: '默认写进 notes/，不要填 README.md——那是项目自己的说明，会被这次发布覆盖。',
       loadFile: '读取 txt 文件',
       loadedFile: '已读取 {name}（{count} 字）',
       fileFailed: '读取失败：{message}',
@@ -55,6 +57,8 @@ window.__ModuleLoader__.load({
       source: 'Source',
       sourceSession: 're-read whole session',
       sourceManual: 'manual',
+      pathLabel: 'File to write inside the repository',
+      pathNote: 'Defaults to notes/; do not use README.md — that is the project’s own description and this publish would overwrite it.',
       loadFile: 'Read a .txt file',
       loadedFile: 'read {name} ({count} chars)',
       fileFailed: 'could not read it: {message}',
@@ -227,6 +231,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Where the button files a draft when the user has not chosen a path. It must
+     * not be a repository's own document such as README.md: a transcript is a
+     * record, and publishing it over the official project description loses text
+     * the user wrote by hand.
+     * @param {unknown} sessionId - the session the draft came from.
+     * @returns {string} a repository-relative path.
+     */
+    function defaultPath(sessionId) {
+      const stamp = new Date().toISOString().slice(0, 16).replace(':', '').replace('T', '-');
+      const label = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId.slice(0, 8) : 'session';
+      return `notes/${stamp}-${label}.md`;
+    }
+
+    /**
      * Wrap a thrown value as an Error, so callers can read `.message`.
      * @param {unknown} error - the thrown value.
      * @returns {Error} the error.
@@ -337,6 +355,8 @@ window.__ModuleLoader__.load({
         const [publishing, setPublishing] = React.useState(false);
         const [draft, setDraft] = React.useState(null);
         const [summary, setSummary] = React.useState('');
+        // Empty means "use the automatic path"; the field shows the real destination.
+        const [path, setPath] = React.useState(null);
         // On by default: a secret gist never appears on the account's Gist page, so
         // a first publish looks like it went nowhere. Keeping one private stays possible.
         const [isPublic, setIsPublic] = React.useState(true);
@@ -399,6 +419,9 @@ window.__ModuleLoader__.load({
           try {
             const loaded = await readTextFile(file);
             setDraft(loaded.text);
+            // A picked file names itself: keep the destination obvious, and keep
+            // the automatic path when the user already chose one.
+            if (path === null || path === undefined) setPath(`notes/${loaded.name}`);
             setStatus({
               kind: 'info',
               text: t('loadedFile').replace('{name}', loaded.name).replace('{count}', String(loaded.text.length)),
@@ -435,6 +458,7 @@ window.__ModuleLoader__.load({
               body: JSON.stringify({
                 target: 'repo',
                 content,
+                path: (path ?? defaultPath(sessionId)).trim(),
                 summary: summary.trim(),
                 private: !isPublic,
                 language: String(document?.documentElement?.lang ?? '') || undefined,
@@ -506,6 +530,13 @@ window.__ModuleLoader__.load({
             placeholder: t('summaryPlaceholder'),
             onChange: (event) => setSummary(event.target.value),
           }),
+          h('label', { className: 'ghp-field' }, t('pathLabel')),
+          h('input', {
+            className: 'ghp-input',
+            value: path ?? defaultPath(sessionId),
+            placeholder: defaultPath(sessionId),
+            onChange: (event) => setPath(event.target.value),
+          }),
           h('label', { className: 'ghp-field' }, t('contentLabel')),
           h('textarea', {
             className: 'ghp-textarea',
@@ -548,7 +579,9 @@ window.__ModuleLoader__.load({
               t('publicLabel'),
             ),
           ),
-          h('div', { className: 'ghp-note' }, t('introNote')),
+          h('div', { className: 'ghp-note' },
+            (path ?? defaultPath(sessionId)).trim().toLowerCase() === 'readme.md' ? t('pathNote') : t('introNote'),
+          ),
           h('div', { className: 'ghp-actions' },
             statusNode,
             h('button', { type: 'button', className: 'ghp-ghost', onClick: () => setOpen(false) }, t('cancel')),
