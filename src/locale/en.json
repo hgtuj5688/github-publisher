@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "GitHub Publisher",
+    "description": "Connect to GitHub, publish AI-written content as a commit in a repository (or as a gist), and let the session model write the commit message."
+  },
+  "button": "Publish to GitHub"
+}

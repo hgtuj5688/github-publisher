@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "GitHub 发布器",
+    "description": "连接 GitHub 账号，把 AI 生成的内容提交到仓库（或发布为 Gist），并由当前会话的模型自动撰写提交说明。"
+  },
+  "button": "发布 GitHub"
+}
