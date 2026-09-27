@@ -22,14 +22,15 @@ window.__ModuleLoader__.load({
     const zh = {
       button: '发布 GitHub',
       title: '发布到 GitHub',
-      hint: '正文来自本会话，可直接编辑；发布为 GitHub 仓库中的一次提交。',
+      hint: '正文是本会话的完整记录，可直接编辑；发布为 GitHub 仓库中的一次提交。',
       source: '来源',
-      sourceConversation: '本会话',
+      sourceSession: '重读整个会话',
       sourceManual: '手动',
+      sessionRange: '本会话 {part}/{total} 条消息',
       summaryLabel: '标题（可选，帮助模型写好简介）',
-      summaryPlaceholder: '这个 Gist 是什么？例如：DSH 插件开发笔记',
+      summaryPlaceholder: '这段总结是什么？例如：DSH 插件开发笔记',
       contentLabel: '要发布的内容',
-      contentPlaceholder: '选择一段回复，或直接在这里粘贴内容',
+      contentPlaceholder: '这会话的全部记录会填在这里，也可以直接粘贴别的内容',
       introNote: '未填写简介时，由本会话的模型自动撰写提交说明。',
       publicLabel: '公开仓库',
       cancel: '取消',
@@ -46,14 +47,15 @@ window.__ModuleLoader__.load({
     const en = {
       button: 'Publish to GitHub',
       title: 'Publish to GitHub',
-      hint: 'The text comes from this session and can be edited; it is published as one commit in a GitHub repository.',
+      hint: 'The text is this session’s complete record, and can be edited; it is published as one commit in a GitHub repository.',
       source: 'Source',
-      sourceConversation: 'this session',
+      sourceSession: 're-read whole session',
       sourceManual: 'manual',
+      sessionRange: 'session {part}/{total} messages',
       summaryLabel: 'Title (optional; helps the model write a good intro)',
-      summaryPlaceholder: 'What is this gist? For example: DSH plugin notes',
+      summaryPlaceholder: 'What is this summary? For example: DSH plugin notes',
       contentLabel: 'Content to publish',
-      contentPlaceholder: 'Pick a reply, or paste the content here',
+      contentPlaceholder: 'This session’s whole record is filled in here; you can also paste something else',
       introNote: "With no description, this session's model writes the commit message.",
       publicLabel: 'Public repository',
       cancel: 'Cancel',
@@ -87,6 +89,7 @@ window.__ModuleLoader__.load({
       '.ghp-field{display:block;color:var(--dsw-alias-label-secondary);margin:6px 0 4px}',
       '.ghp-textarea{width:100%;height:150px;resize:vertical;padding:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;line-height:1.45}',
       '.ghp-check{display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--dsw-alias-label-secondary)}',
+      '.ghp-count{flex:1 1 auto;text-align:right;color:var(--dsw-alias-label-secondary)}',
       '.ghp-note{margin-top:6px;color:var(--dsw-alias-label-secondary)}',
       '.ghp-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:10px}',
       '.ghp-ghost{padding:6px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer}',
@@ -125,42 +128,66 @@ window.__ModuleLoader__.load({
       return parts.join('\n\n').trim();
     }
 
+    /** Character budget for one transcript draft, kept below the host's body limit. */
+    const SESSION_CHAR_BUDGET = 60_000;
+
     /**
-     * Build the default draft from this session: the user's latest request plus
-     * everything the assistant answered after it.
-     * @param {readonly any[]} eventNodes - the Trajectory event nodes.
-     * @returns {{request: string, reply: string}} the draft parts.
+     * Render one node as a titled section.
+     * @param {{title: string, text: string}} entry - the section.
+     * @returns {string} the markdown section.
      */
-    function latestExchange(eventNodes) {
-      if (!Array.isArray(eventNodes)) return { request: '', reply: '' };
-      let request = '';
-      const replies = [];
-      for (let index = eventNodes.length - 1; index >= 0; index -= 1) {
-        const node = eventNodes[index];
-        if (node === null || typeof node !== 'object') continue;
-        if (node.kind === 'assistant') {
-          const value = nodeText(node);
-          if (value.length > 0) replies.unshift(value);
-          continue;
-        }
-        if (node.kind === 'user' || node.kind === 'steering') {
-          request = nodeText(node);
-          break;
-        }
-      }
-      return { request, reply: replies.join('\n\n') };
+    function renderEntry(entry) {
+      return `### ${entry.title}\n\n${entry.text}`;
     }
 
     /**
-     * Compose the publishable document from a request and a reply.
-     * @param {string} request - the user's ask.
-     * @param {string} reply - the assistant's answer.
+     * Build the draft from the WHOLE session, not just the latest exchange: every
+     * user and assistant message in order. The newest messages are kept when the
+     * record is larger than the budget, because the end of a session carries the
+     * conclusions.
+     * @param {readonly any[]} eventNodes - the Trajectory event nodes.
+     * @returns {{text: string, included: number, total: number}} the transcript.
+     */
+    function sessionTranscript(eventNodes) {
+      if (!Array.isArray(eventNodes)) return { text: '', included: 0, total: 0 };
+      const entries = [];
+      let total = 0;
+      for (const node of eventNodes) {
+        if (node === null || typeof node !== 'object') continue;
+        const speaker = node.kind === 'assistant'
+          ? '回复'
+          : node.kind === 'user' || node.kind === 'steering' ? '我的要求' : null;
+        if (speaker === null) continue;
+        const value = nodeText(node);
+        if (value.length === 0) continue;
+        total += 1;
+        entries.push({ title: `${speaker} ${total}`, text: value });
+      }
+      let included = 0;
+      let text = '';
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const candidate = renderEntry(entries[index]);
+        const joined = text.length === 0 ? candidate : `${candidate}\n\n${text}`;
+        if (joined.length > SESSION_CHAR_BUDGET && text.length > 0) break;
+        text = joined;
+        included += 1;
+      }
+      return { text, included, total };
+    }
+
+    /**
+     * Turn a transcript into the publishable document.
+     * @param {{text: string, included: number, total: number}} transcript - the transcript.
      * @returns {string} the document body.
      */
-    function composeDocument(request, reply) {
-      if (request.length > 0 && reply.length > 0) return `## 我的要求\n\n${request}\n\n## 回复\n\n${reply}`;
-      if (reply.length > 0) return reply;
-      return request;
+    function composeDocument(transcript) {
+      const body = (transcript.text ?? '').trim();
+      if (body.length === 0) return '';
+      const header = '# 会话记录\n\n';
+      if (transcript.included < transcript.total) {
+        return `${header}> 共 ${transcript.total} 条消息，这里保留了最后 ${transcript.included} 条。\n\n${body}`;
+      }
+      return `${header}${body}`;
     }
 
     /**
@@ -291,8 +318,8 @@ window.__ModuleLoader__.load({
           };
         }, [open, account]);
 
-        const exchange = React.useMemo(
-          () => latestExchange(snap === null || snap === undefined ? [] : snap.eventNodes),
+        const transcript = React.useMemo(
+          () => sessionTranscript(snap === null || snap === undefined ? [] : snap.eventNodes),
           [snap],
         );
 
@@ -305,14 +332,14 @@ window.__ModuleLoader__.load({
         const toggle = () => {
           setOpen((wasOpen) => {
             if (wasOpen) return false;
-            setDraft((current) => (current === null ? composeDocument(exchange.request, exchange.reply) : current));
+            setDraft((current) => (current === null ? composeDocument(transcript) : current));
             return true;
           });
         };
 
         /** Re-read the draft from the session. @returns {void} */
         const useSession = () => {
-          setDraft(composeDocument(exchange.request, exchange.reply));
+          setDraft(composeDocument(transcript));
           setStatus(null);
         };
 
@@ -414,7 +441,14 @@ window.__ModuleLoader__.load({
             onChange: (event) => setDraft(event.target.value),
           }),
           h('div', { className: 'ghp-row' },
-            h('button', { type: 'button', className: 'ghp-ghost', onClick: useSession }, t('sourceConversation')),
+            h('button', { type: 'button', className: 'ghp-ghost', onClick: useSession }, t('sourceSession')),
+            h('span', { className: 'ghp-count' },
+              transcript.total === 0
+                ? ''
+                : t('sessionRange')
+                  .replace('{part}', String(transcript.included))
+                  .replace('{total}', String(transcript.total)),
+            ),
             h('label', { className: 'ghp-check' },
               h('input', { type: 'checkbox', checked: isPublic, onChange: (event) => setIsPublic(event.target.checked === true) }),
               t('publicLabel'),

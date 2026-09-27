@@ -368,6 +368,30 @@ function explainFailure(status, route, method, detail, documentationUrl) {
 }
 
 /**
+ * Explain a transport failure in terms the caller can act on.
+ *
+ * On a machine behind a proxy client, `api.github.com` can resolve but not
+ * answer (a fake-IP resolver hands out an address no route serves), which
+ * surfaces as a bare `fetch failed` that reads like a plugin bug. Naming the
+ * likely cause turns that into a fixable instruction.
+ * @param {string} route - the requested path.
+ * @param {unknown} error - the thrown transport error.
+ * @returns {string} the model-facing message.
+ */
+function explainNetworkFailure(route, error) {
+  const cause = error !== null && typeof error === "object" ? error.cause : undefined;
+  const code = cause !== null && typeof cause === "object" && typeof cause.code === "string" ? cause.code : undefined;
+  const reason = code !== undefined ? code : error instanceof Error ? error.message : String(error);
+  return (
+    `GitHub request to ${route} never reached the API (${reason}). ` +
+    `The usual cause is the network path: on this machine the GitHub hosts resolve to a proxy ` +
+    `client's fake-IP range (198.18.0.0/15), and when that proxy cannot route github.com the ` +
+    `connection simply times out. Test with \`Invoke-WebRequest https://api.github.com/zen\`, ` +
+    `switch or refresh the proxy node, then retry.`
+  );
+}
+
+/**
  * Call the GitHub REST API and decode the JSON reply.
  * @param {typeof DEFAULTS} config - resolved plugin config.
  * @param {string} token - the bearer token.
@@ -395,7 +419,7 @@ async function github(config, token, route, options = {}) {
   try {
     response = await fetch(url, init);
   } catch (error) {
-    throw new GitHubPublisherError(`GitHub request to ${route} failed: ${error instanceof Error ? error.message : String(error)}`, "NETWORK");
+    throw new GitHubPublisherError(explainNetworkFailure(route, error), "NETWORK");
   }
 
   const body = await response.text();
